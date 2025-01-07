@@ -1,19 +1,21 @@
 use std::{collections::HashSet, hash::Hash, time::Duration};
 
 use anyhow::Context;
-use askama_axum::{IntoResponse, Response, Template};
 use axum::{
     extract::{Query, Request},
-    response::Redirect,
+    response::{Html, IntoResponse, Redirect, Response},
     Form, Router,
 };
+use base64::prelude::{Engine, BASE64_STANDARD};
 use hickory_resolver::{
     config::{ResolverConfig, ResolverOpts},
     error::ResolveErrorKind,
     proto::rr::RecordType,
     TokioAsyncResolver,
 };
+use maud::{html, PreEscaped, DOCTYPE};
 use serde::Deserialize;
+use sha2::{Digest, Sha512};
 use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
 use tracing::{info, info_span, Span};
 use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
@@ -62,26 +64,18 @@ struct QueryParams {
     domain: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct FormParams {
-    domain: String,
-}
-
-#[derive(Template)]
-#[template(path = "index.html.j2")]
-struct IndexTemplate {
-    domain: Option<AcceptableDomain>,
-    certificate_info: Option<Result<CertificateInfo, anyhow::Error>>,
-    dns_info: Option<DnsInfo>,
-}
-
 async fn handle_get(Query(query_params): Query<QueryParams>) -> Response {
-    IndexTemplate {
+    render(ViewData {
         domain: AcceptableDomain::new(query_params.domain.unwrap_or_default()).ok(),
         certificate_info: None,
         dns_info: None,
-    }
-    .into_response()
+        error: None,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct FormParams {
+    domain: String,
 }
 
 async fn handle_post(
@@ -89,24 +83,164 @@ async fn handle_post(
     Form(form_params): Form<FormParams>,
 ) -> Response {
     match AcceptableDomain::new(form_params.domain.clone()) {
-        Err(e) => Response::builder()
-            .status(400)
-            .body(format!("Invalid domain: {}", e))
-            .unwrap()
-            .into_response(),
+        Err(e) => render(ViewData {
+            domain: None,
+            certificate_info: None,
+            dns_info: None,
+            error: Some(e),
+        }),
         Ok(form_domain) => {
             if query_params.domain.unwrap_or_default() != form_domain.domain {
                 Redirect::temporary(&format!("/?domain={}", form_domain.domain)).into_response()
             } else {
-                IndexTemplate {
+                render(ViewData {
                     domain: Some(form_domain.clone()),
                     certificate_info: Some(get_certificate_info(&form_domain).await),
                     dns_info: Some(get_dns_info(&form_domain).await),
-                }
-                .into_response()
+                    error: None,
+                })
             }
         }
     }
+}
+
+struct ViewData {
+    domain: Option<AcceptableDomain>,
+    certificate_info: Option<Result<CertificateInfo, anyhow::Error>>,
+    dns_info: Option<DnsInfo>,
+    error: Option<anyhow::Error>,
+}
+
+fn render(view_data: ViewData) -> Response {
+    let css = include_str!("main.css");
+    let js = include_str!("main.js");
+
+    let css_sha = sha512_base64(css);
+    let js_sha = sha512_base64(js);
+
+    let mut response = Html(html!(
+        (DOCTYPE)
+        head {
+            meta charset="utf-8";
+            meta name="viewport" content="width=device-width, initial-scale=1";
+            title {
+                @if let Some(domain) = &view_data.domain {
+                    (domain.domain) "- Flodoto"
+                } @else {
+                    "Flodoto"
+                }
+            }
+            style { (PreEscaped(css)) }
+        }
+        body {
+            section {
+                form action="/" method="post" {
+                    label for="domain-input" { "Domain"  };
+                    input type="text" id="domain-input" name="domain" placeholder="example.com" required value=(view_data.domain.map(|d| d.domain).unwrap_or_default());
+                    button type="submit" { "Submit" };
+                }
+                @if let Some(error) = &view_data.error {
+                    div.error {
+                        (error)
+                    };
+                }
+            }
+            @match &view_data.certificate_info {
+                Some(Ok(info)) => {
+                    section {
+                        h1 { "Certificate Information" };
+                        div {
+                            dl {
+                                dt { "Issuer" };
+                                dd { (info.issuer) };
+
+                                dt { "Subject" };
+                                dd { (info.subject) };
+
+                                dt { "Subject Alternative Name" };
+                                dd {
+                                    @for domain_name in &info.domain_names {
+                                        a href={"https://" (domain_name)} target="_blank" rel="noopener noreferrer" {
+                                            (domain_name)
+                                        };
+                                        br;
+                                    }
+                                }
+
+                                dt { "Not Before" };
+                                dd { (info.not_before) };
+
+                                dt { "Not After" };
+                                dd { (info.not_after) };
+                            }
+                        }
+                    }
+                }
+                Some(Err(error)) => {
+                    section {
+                        h1 { "Certificate Info" };
+                        div.error {
+                            (error)
+                        };
+                    }
+                }
+                None => {}
+            }
+            @if let Some(info) = &view_data.dns_info {
+                section {
+                    h1 { "DNS Information" };
+                    @for error in &info.errors {
+                        div.error {
+                            (error)
+                        }
+                    }
+                    @if info.records.is_empty() {
+                        div.error { "No records found" }
+                    } @else {
+                        div {
+                            table {
+                                thead {
+                                    tr {
+                                        th { "Name" };
+                                        th { "Type" };
+                                        th { "Data" };
+                                    }
+                                }
+                                tbody {
+                                    @for record in &info.records {
+                                        tr {
+                                            td { (record.name) }
+                                            td { (record.record_type) }
+                                            td.colorize-ip { (record.data) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            script { (PreEscaped(js)) }
+        }
+    ).into_string()).into_response();
+
+    response.headers_mut().insert(
+        "Content-Security-Policy",
+        format!(
+            "default-src 'none'; style-src 'sha512-{}'; script-src 'sha512-{}'",
+            css_sha, js_sha
+        )
+        .parse()
+        .unwrap(),
+    );
+
+    response
+}
+
+fn sha512_base64(data: &str) -> String {
+    let mut hasher = Sha512::new();
+    hasher.update(data);
+    BASE64_STANDARD.encode(hasher.finalize())
 }
 
 #[derive(Debug, Clone)]
@@ -246,10 +380,7 @@ async fn get_dns_info(domain: &AcceptableDomain) -> DnsInfo {
         RecordType::SRV,
         RecordType::CNAME,
     ] {
-        for fqdn in &[
-            domain.fqdn_with_www(),
-            domain.fqdn_without_www(),
-        ] {
+        for fqdn in &[domain.fqdn_with_www(), domain.fqdn_without_www()] {
             match resolver.lookup(fqdn, *record_type).await {
                 Ok(lookup) => {
                     unique_records.extend(lookup.record_iter().map(|record| DnsInfoRecord {

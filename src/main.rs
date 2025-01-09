@@ -220,6 +220,13 @@ fn render(view_data: ViewData) -> Response {
                     }
                 }
             }
+            footer {
+                p {
+                    "Built by " a href="https://florianlammel.com" target="_blank" rel="noopener noreferrer" { "Florian Lammel" }
+                    ". Source code on " a href="https://github.com/flammel/flodoto" target="_blank" rel="noopener noreferrer" { "GitHub"}
+                    "."
+                }
+            }
             script { (PreEscaped(js)) }
         }
     ).into_string()).into_response();

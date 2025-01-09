@@ -89,3 +89,8 @@ section {
 h1, h2, dl, dt, dd, p {
   margin: 0;
 }
+
+footer {
+  font-size: 0.75rem;
+  text-align: center;
+}

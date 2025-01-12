@@ -136,7 +136,7 @@ fn render(view_data: ViewData) -> Response {
             section {
                 form action="/" method="post" {
                     label for="domain-input" { "Domain"  };
-                    input type="text" id="domain-input" name="domain" placeholder="example.com" required value=(view_data.domain.map(|d| d.domain).unwrap_or_default());
+                    input type="text" id="domain-input" name="domain" placeholder="example.com" required autofocus value=(view_data.domain.map(|d| d.domain).unwrap_or_default());
                     button type="submit" { "Submit" };
                 }
                 @if let Some(error) = &view_data.error {

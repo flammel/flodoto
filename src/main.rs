@@ -283,7 +283,7 @@ impl AcceptableDomain {
 
         if prepared_domain
             .chars()
-            .any(|c| !c.is_ascii_alphanumeric() && c != '-' && c != '.')
+            .any(|c| !c.is_ascii_alphanumeric() && c != '-' && c != '.' && c != '_')
         {
             anyhow::bail!("Domain contains invalid characters");
         }
